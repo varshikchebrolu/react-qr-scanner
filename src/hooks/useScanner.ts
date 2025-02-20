@@ -1,28 +1,23 @@
 import { useRef, useCallback, useEffect, RefObject } from 'react';
-
 import { type DetectedBarcode, type BarcodeFormat, BarcodeDetector } from 'barcode-detector';
-
-import { IUseScannerState } from '../types';
-
 import { base64Beep } from '../assets/base64Beep';
 
 interface IUseScannerProps {
     videoElementRef: RefObject<HTMLVideoElement | null>;
-    onScan: (result: DetectedBarcode[]) => void;
-    onFound: (result: DetectedBarcode[]) => void;
+    onScan: (results: DetectedBarcode[]) => void;
+    onFound: (results: DetectedBarcode[]) => void;
     formats?: BarcodeFormat[];
     audio?: boolean;
-    allowMultiple?: boolean;
     retryDelay?: number;
-    scanDelay?: number;
 }
 
 export default function useScanner(props: IUseScannerProps) {
-    const { videoElementRef, onScan, onFound, retryDelay = 100, scanDelay = 0, formats = [], audio = true, allowMultiple = false } = props;
+    const { videoElementRef, onScan, onFound, retryDelay = 100, formats = [], audio = true } = props;
 
     const barcodeDetectorRef = useRef(new BarcodeDetector({ formats }));
     const audioRef = useRef<HTMLAudioElement | null>(null);
     const animationFrameIdRef = useRef<number | null>(null);
+    const detectedCodesRef = useRef<Set<string>>(new Set());
 
     useEffect(() => {
         barcodeDetectorRef.current = new BarcodeDetector({ formats });
@@ -35,67 +30,57 @@ export default function useScanner(props: IUseScannerProps) {
     }, [audio]);
 
     const processFrame = useCallback(
-        (state: IUseScannerState) => async (timeNow: number) => {
+        (state: any) => async (timeNow: number) => {
             if (videoElementRef.current !== null && videoElementRef.current.readyState > 1) {
-                const { lastScan, contentBefore, lastScanHadContent } = state;
+                const { lastScan } = state;
+                const count =3
 
                 if (timeNow - lastScan < retryDelay) {
                     animationFrameIdRef.current = window.requestAnimationFrame(processFrame(state));
                 } else {
                     const detectedCodes = await barcodeDetectorRef.current.detect(videoElementRef.current);
+                    const detectedValues = new Set(detectedCodes.map((code) => code.rawValue));
 
-                    const anyNewCodesDetected = detectedCodes.some((code: DetectedBarcode) => {
-                        return !contentBefore.includes(code.rawValue);
+                    let newScanned = false;
+                    detectedValues.forEach((value) => {
+                        if (!detectedCodesRef.current.has(value)) {
+                            detectedCodesRef.current.add(value);
+                            newScanned = true;
+                        }
                     });
 
-                    const currentScanHasContent = detectedCodes.length > 0;
-
-                    let lastOnScan = state.lastOnScan;
-
-                    const scanDelayPassed = timeNow - lastOnScan >= scanDelay;
-
-                    if (anyNewCodesDetected || (allowMultiple && currentScanHasContent && scanDelayPassed)) {
+                    if (newScanned) {
                         if (audio && audioRef.current && audioRef.current.paused) {
                             audioRef.current.play().catch((error) => console.error('Error playing the sound', error));
                         }
-
-                        lastOnScan = timeNow;
-
                         onScan(detectedCodes);
-                    }
-
-                    if (currentScanHasContent) {
                         onFound(detectedCodes);
                     }
 
-                    if (!currentScanHasContent && lastScanHadContent) {
-                        onFound(detectedCodes);
+                    // Stop scanning if all codes in the frame are already detected
+                    if (detectedValues.size > 0 && Array.from(detectedCodesRef.current).length>=count && !newScanned) {
+                        onScan(Array.from(detectedCodesRef.current) as any);
+                        audioRef.current?.play();
+                        console.log('stopping the scan');
+                        stopScanning();
+                    } else {
+                        const newState = {
+                            lastScan: timeNow
+                        };
+                        animationFrameIdRef.current = window.requestAnimationFrame(processFrame(newState));
                     }
-
-                    const newState = {
-                        lastScan: timeNow,
-                        lastOnScan: lastOnScan,
-                        lastScanHadContent: currentScanHasContent,
-                        contentBefore: anyNewCodesDetected ? detectedCodes.map((code: DetectedBarcode) => code.rawValue) : contentBefore
-                    };
-
-                    animationFrameIdRef.current = window.requestAnimationFrame(processFrame(newState));
                 }
             }
         },
-        [videoElementRef.current, onScan, onFound, retryDelay]
+        [videoElementRef, onScan, onFound, retryDelay]
     );
 
     const startScanning = useCallback(() => {
+        detectedCodesRef.current.clear();
         const current = performance.now();
-
         const initialState = {
-            lastScan: current,
-            lastOnScan: current,
-            contentBefore: [],
-            lastScanHadContent: false
+            lastScan: current
         };
-
         animationFrameIdRef.current = window.requestAnimationFrame(processFrame(initialState));
     }, [processFrame]);
 
